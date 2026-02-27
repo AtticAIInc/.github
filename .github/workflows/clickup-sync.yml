@@ -27,6 +27,9 @@ on:
       CLICKUP_API_TOKEN:
         required: true
 
+# PR linking is handled by ClickUp's native GitHub integration (rich cards).
+# This workflow only handles status transitions and custom field updates.
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -48,7 +51,7 @@ jobs:
           done
 
           if [ -z "$TICKET_ID" ]; then
-            echo "::notice::Branch '$BRANCH' has no ticket prefix ($PREFIXES). Skipping sync."
+            echo "::notice::Branch '$BRANCH' has no ticket prefix ($PREFIXES). Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "ticket_id=$TICKET_ID" >> "$GITHUB_OUTPUT"
@@ -68,52 +71,32 @@ jobs:
             echo "::warning::ClickUp auth failed (401). Check CLICKUP_API_TOKEN secret."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ "$HTTP_CODE" = "404" ]; then
-            echo "::warning::ClickUp task $TICKET_ID not found (404). Skipping sync."
+            echo "::warning::ClickUp task $TICKET_ID not found (404). Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ "$HTTP_CODE" != "200" ]; then
-            echo "::warning::ClickUp API returned $HTTP_CODE for task $TICKET_ID. Skipping."
+            echo "::warning::ClickUp API returned $HTTP_CODE. Skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             TASK_NAME=$(jq -r '.name // "unknown"' /tmp/task.json)
-            echo "::notice::Syncing PR with ClickUp task: $TASK_NAME ($TICKET_ID)"
+            echo "::notice::Syncing with ClickUp task: $TASK_NAME ($TICKET_ID)"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: PR opened — move to "in review" and comment
+      - name: PR opened — move to "in review"
         if: |
           steps.parse.outputs.skip != 'true' &&
           steps.validate.outputs.skip != 'true' &&
           (github.event.action == 'opened' || github.event.action == 'ready_for_review')
         continue-on-error: true
         run: |
-          TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
-          TOKEN="${{ secrets.CLICKUP_API_TOKEN }}"
-          STATUS="${{ inputs.status_in_review }}"
-
-          # Update status
           curl -sf -X PUT \
-            -H "Authorization: $TOKEN" \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg s "$STATUS" '{status: $s}')" \
-            "https://api.clickup.com/api/v2/task/$TICKET_ID" > /dev/null || \
-            echo "::warning::Failed to update status to '$STATUS'"
+            -d "$(jq -n --arg s "${{ inputs.status_in_review }}" '{status: $s}')" \
+            "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
+            > /dev/null || echo "::warning::Failed to update status to '${{ inputs.status_in_review }}'"
 
-          # Post comment with PR link
-          COMMENT=$(jq -n \
-            --arg url "${{ github.event.pull_request.html_url }}" \
-            --arg title "${{ github.event.pull_request.title }}" \
-            --arg author "${{ github.event.pull_request.user.login }}" \
-            --arg repo "${{ github.repository }}" \
-            '{comment_text: "🔗 PR opened: \(.title)\n\(.url)\nAuthor: \(.author) | Repo: \(.repo)", notify_all: false}')
-
-          curl -sf -X POST \
-            -H "Authorization: $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$COMMENT" \
-            "https://api.clickup.com/api/v2/task/$TICKET_ID/comment" > /dev/null || \
-            echo "::warning::Failed to post PR comment on task $TICKET_ID"
-
-      - name: PR merged — move to "complete" and comment with SHA
+      - name: PR merged — move to "complete"
         if: |
           steps.parse.outputs.skip != 'true' &&
           steps.validate.outputs.skip != 'true' &&
@@ -121,59 +104,14 @@ jobs:
           github.event.pull_request.merged == true
         continue-on-error: true
         run: |
-          TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
-          TOKEN="${{ secrets.CLICKUP_API_TOKEN }}"
-          QA_STATUS="${{ inputs.status_qa }}"
-          COMPLETE_STATUS="${{ inputs.status_complete }}"
-          STATUS="${QA_STATUS:-$COMPLETE_STATUS}"
-          SHA="${{ github.event.pull_request.merge_commit_sha }}"
-
-          # Update status
+          QA="${{ inputs.status_qa }}"
+          STATUS="${QA:-${{ inputs.status_complete }}}"
           curl -sf -X PUT \
-            -H "Authorization: $TOKEN" \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg s "$STATUS" '{status: $s}')" \
-            "https://api.clickup.com/api/v2/task/$TICKET_ID" > /dev/null || \
-            echo "::warning::Failed to update status to '$STATUS'"
-
-          # Post merge comment
-          COMMENT=$(jq -n \
-            --arg url "${{ github.event.pull_request.html_url }}" \
-            --arg sha "$SHA" \
-            --arg repo "${{ github.repository }}" \
-            --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{comment_text: "✅ PR merged\n\(.url)\nSHA: \(.sha)\nMerged: \(.time) | Repo: \(.repo)", notify_all: false}')
-
-          curl -sf -X POST \
-            -H "Authorization: $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$COMMENT" \
-            "https://api.clickup.com/api/v2/task/$TICKET_ID/comment" > /dev/null || \
-            echo "::warning::Failed to post merge comment on task $TICKET_ID"
-
-      - name: PR closed without merge — comment only
-        if: |
-          steps.parse.outputs.skip != 'true' &&
-          steps.validate.outputs.skip != 'true' &&
-          github.event.action == 'closed' &&
-          github.event.pull_request.merged == false
-        continue-on-error: true
-        run: |
-          TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
-          TOKEN="${{ secrets.CLICKUP_API_TOKEN }}"
-
-          COMMENT=$(jq -n \
-            --arg url "${{ github.event.pull_request.html_url }}" \
-            --arg title "${{ github.event.pull_request.title }}" \
-            --arg repo "${{ github.repository }}" \
-            '{comment_text: "❌ PR closed without merge: \(.title)\n\(.url)\nRepo: \(.repo)", notify_all: false}')
-
-          curl -sf -X POST \
-            -H "Authorization: $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$COMMENT" \
-            "https://api.clickup.com/api/v2/task/$TICKET_ID/comment" > /dev/null || \
-            echo "::warning::Failed to post close comment on task $TICKET_ID"
+            "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
+            > /dev/null || echo "::warning::Failed to update status to '$STATUS'"
 
       - name: Severity label — update custom field
         if: |
@@ -183,17 +121,12 @@ jobs:
           inputs.severity_field_id != ''
         continue-on-error: true
         run: |
-          TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
-          TOKEN="${{ secrets.CLICKUP_API_TOKEN }}"
           LABEL="${{ github.event.label.name }}"
-          FIELD_ID="${{ inputs.severity_field_id }}"
-
           if [[ "$LABEL" =~ ^severity:(.+)$ ]]; then
-            SEVERITY="${BASH_REMATCH[1]}"
             curl -sf -X POST \
-              -H "Authorization: $TOKEN" \
+              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
               -H "Content-Type: application/json" \
-              -d "$(jq -n --arg v "$SEVERITY" '{value: $v}')" \
-              "https://api.clickup.com/api/v2/task/$TICKET_ID/field/$FIELD_ID" > /dev/null || \
-              echo "::warning::Failed to update severity field on task $TICKET_ID"
+              -d "$(jq -n --arg v "${BASH_REMATCH[1]}" '{value: $v}')" \
+              "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}/field/${{ inputs.severity_field_id }}" \
+              > /dev/null || echo "::warning::Failed to update severity field"
           fi

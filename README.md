@@ -6,20 +6,31 @@ This is the Home page for The Attic AI
 
 Org-level shared workflows and configuration for AtticAI repositories.
 
-## Shared Workflows
+## ClickUp PR Sync
 
-### ClickUp PR Sync
+Two-part setup that connects GitHub PRs to ClickUp tickets:
 
-Automatically syncs GitHub PR lifecycle events to ClickUp tickets. When a PR is opened, merged, or closed, the corresponding ClickUp ticket gets a status update and a comment linking back to the PR.
+1. **ClickUp's native GitHub integration** — creates rich PR cards on tickets (status, reviewers, etc.)
+2. **Reusable workflow** — automates ticket status transitions (backlog → in review → complete)
 
-**How it works:** The workflow parses the PR's branch name for a ticket prefix (`CU-` or `RB-`), extracts the ClickUp task ID, and calls the ClickUp API to update status and post comments.
+### Part 1: Native GitHub Integration (one-time setup)
 
-#### Prerequisites
+This gives you the rich PR cards on ClickUp tickets.
 
-1. `CLICKUP_API_TOKEN` must be configured as an org-level secret with access to target repos
-2. Branches must follow the naming convention: `CU-{task_id}/{description}` or `RB-{task_id}/{description}`
+1. In ClickUp, go to **Settings → Integrations → GitHub**
+2. Click **Connect** and authorize the AtticAIInc GitHub org
+3. Select which spaces/repos to connect
+4. Under integration settings, disable **"Post comments on GitHub"** (optional — prevents noisy PR comments)
 
-#### Adoption
+Once connected, any branch or PR title containing `CU-{task_id}` automatically links to the ClickUp ticket with a rich card showing PR status, reviewers, and more.
+
+### Part 2: Status Transition Workflow
+
+The native integration links PRs but doesn't move ticket status. This workflow handles that:
+
+- PR opened → ticket moves to **"in review"**
+- PR merged → ticket moves to **"complete"** (or "qa")
+- Severity label added → updates a custom field
 
 Add this file to your repo at `.github/workflows/clickup-sync.yml`:
 
@@ -37,9 +48,7 @@ jobs:
     secrets: inherit
 ```
 
-That's it. PRs on branches with `CU-` or `RB-` prefixes will sync automatically.
-
-#### Configuration
+### Configuration
 
 All inputs are optional — defaults work for most repos.
 
@@ -51,9 +60,9 @@ All inputs are optional — defaults work for most repos.
 | `severity_field_id` | `""` | ClickUp custom field ID for severity label updates |
 | `branch_prefixes` | `"CU-,RB-"` | Comma-separated branch name prefixes to detect |
 
-#### Customizing Status Mapping
+### Customizing Status Mapping
 
-If your ClickUp list uses different status names, override them in the caller:
+Override status names for repos that use different ClickUp lists:
 
 ```yaml
 jobs:
@@ -61,19 +70,15 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: AtticAIInc/.github/.github/workflows/clickup-sync.yml@main
     with:
-      status_complete: "completed"  # ReaderBee uses "completed" instead of "complete"
+      status_complete: "completed"
     secrets: inherit
 ```
 
-#### Event Behavior
+### Prerequisites
 
-| PR Event | ClickUp Action |
-|----------|---------------|
-| Opened / Ready for review | Ticket → "in review", comment with PR link |
-| Merged | Ticket → "complete" (or "qa"), comment with merge SHA |
-| Closed without merge | Comment only, no status change |
-| Labeled `severity:*` | Updates custom field (if `severity_field_id` is set) |
+- `CLICKUP_API_TOKEN` configured as an org-level secret
+- Branches follow `CU-{task_id}/{description}` or `RB-{task_id}/{description}` naming
 
-#### Error Handling
+### Error Handling
 
-All ClickUp API calls use `continue-on-error`. If the ClickUp API is down or returns an error, the PR is never blocked. Warnings appear in the Actions log for debugging.
+All ClickUp API calls use `continue-on-error`. If the API is down or returns an error, the PR is never blocked. Warnings appear in the Actions log.
