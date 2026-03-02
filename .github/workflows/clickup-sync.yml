@@ -24,7 +24,7 @@ on:
         type: string
         default: "CU-,RB-"
     secrets:
-      CLICKUP_API_TOKEN:
+      CLICKUP_TOKEN:
         required: true
       GANDALF_APP_ID:
         required: true
@@ -76,7 +76,7 @@ jobs:
         run: |
           TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
           HTTP_CODE=$(curl -s -o /tmp/task.json -w "%{http_code}" \
-            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Authorization: ${{ secrets.CLICKUP_TOKEN }}" \
             "https://api.clickup.com/api/v2/task/$TICKET_ID")
 
           if [ "$HTTP_CODE" = "401" ]; then
@@ -102,7 +102,7 @@ jobs:
         continue-on-error: true
         run: |
           curl -sf -X PUT \
-            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Authorization: ${{ secrets.CLICKUP_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg s "${{ inputs.status_in_review }}" '{status: $s}')" \
             "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
@@ -119,7 +119,7 @@ jobs:
           QA="${{ inputs.status_qa }}"
           STATUS="${QA:-${{ inputs.status_complete }}}"
           curl -sf -X PUT \
-            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Authorization: ${{ secrets.CLICKUP_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg s "$STATUS" '{status: $s}')" \
             "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
@@ -136,7 +136,7 @@ jobs:
           LABEL="${{ github.event.label.name }}"
           if [[ "$LABEL" =~ ^severity:(.+)$ ]]; then
             curl -sf -X POST \
-              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+              -H "Authorization: ${{ secrets.CLICKUP_TOKEN }}" \
               -H "Content-Type: application/json" \
               -d "$(jq -n --arg v "${BASH_REMATCH[1]}" '{value: $v}')" \
               "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}/field/${{ inputs.severity_field_id }}" \
