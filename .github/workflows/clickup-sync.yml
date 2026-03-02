@@ -1,0 +1,174 @@
+name: ClickUp PR Sync
+
+on:
+  workflow_call:
+    inputs:
+      status_in_review:
+        description: "ClickUp status to set when a PR is opened"
+        type: string
+        default: "in review"
+      status_complete:
+        description: "ClickUp status to set when a PR is merged"
+        type: string
+        default: "complete"
+      status_qa:
+        description: "If set, merged PRs move here instead of status_complete"
+        type: string
+        default: ""
+      severity_field_id:
+        description: "ClickUp custom field ID for severity labels (leave empty to skip)"
+        type: string
+        default: ""
+      branch_prefixes:
+        description: "Comma-separated branch prefixes to scan for ticket IDs"
+        type: string
+        default: "CU-,RB-"
+    secrets:
+      CLICKUP_API_TOKEN:
+        required: true
+      GANDALF_APP_ID:
+        required: true
+      GANDALF_PRIVATE_KEY:
+        required: true
+
+# PR linking is handled by ClickUp's native GitHub integration (rich cards).
+# This workflow handles status transitions, custom field updates, and
+# cleans up the noisy "Task linked" comments that ClickUp Bot posts on PRs.
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Gandalf token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
+        id: gandalf-token
+        with:
+          app-id: ${{ secrets.GANDALF_APP_ID }}
+          private-key: ${{ secrets.GANDALF_PRIVATE_KEY }}
+
+      - name: Parse branch for ticket ID
+        id: parse
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          PREFIXES="${{ inputs.branch_prefixes }}"
+
+          TICKET_ID=""
+          IFS=',' read -ra PREFIX_ARRAY <<< "$PREFIXES"
+          for prefix in "${PREFIX_ARRAY[@]}"; do
+            prefix=$(echo "$prefix" | xargs)
+            if [[ "$BRANCH" =~ ^${prefix}([a-zA-Z0-9]+) ]]; then
+              TICKET_ID="${BASH_REMATCH[1]}"
+              break
+            fi
+          done
+
+          if [ -z "$TICKET_ID" ]; then
+            echo "::notice::Branch '$BRANCH' has no ticket prefix ($PREFIXES). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ticket_id=$TICKET_ID" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate ticket exists
+        if: steps.parse.outputs.skip != 'true'
+        id: validate
+        run: |
+          TICKET_ID="${{ steps.parse.outputs.ticket_id }}"
+          HTTP_CODE=$(curl -s -o /tmp/task.json -w "%{http_code}" \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            "https://api.clickup.com/api/v2/task/$TICKET_ID")
+
+          if [ "$HTTP_CODE" = "401" ]; then
+            echo "::warning::ClickUp auth failed (401). Check CLICKUP_API_TOKEN secret."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "::warning::ClickUp task $TICKET_ID not found (404). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::ClickUp API returned $HTTP_CODE. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            TASK_NAME=$(jq -r '.name // "unknown"' /tmp/task.json)
+            echo "::notice::Syncing with ClickUp task: $TASK_NAME ($TICKET_ID)"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: PR opened — move to "in review"
+        if: |
+          steps.parse.outputs.skip != 'true' &&
+          steps.validate.outputs.skip != 'true' &&
+          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+        continue-on-error: true
+        run: |
+          curl -sf -X PUT \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg s "${{ inputs.status_in_review }}" '{status: $s}')" \
+            "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
+            > /dev/null || echo "::warning::Failed to update status to '${{ inputs.status_in_review }}'"
+
+      - name: PR merged — move to "complete"
+        if: |
+          steps.parse.outputs.skip != 'true' &&
+          steps.validate.outputs.skip != 'true' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true
+        continue-on-error: true
+        run: |
+          QA="${{ inputs.status_qa }}"
+          STATUS="${QA:-${{ inputs.status_complete }}}"
+          curl -sf -X PUT \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg s "$STATUS" '{status: $s}')" \
+            "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}" \
+            > /dev/null || echo "::warning::Failed to update status to '$STATUS'"
+
+      - name: Severity label — update custom field
+        if: |
+          steps.parse.outputs.skip != 'true' &&
+          steps.validate.outputs.skip != 'true' &&
+          github.event.action == 'labeled' &&
+          inputs.severity_field_id != ''
+        continue-on-error: true
+        run: |
+          LABEL="${{ github.event.label.name }}"
+          if [[ "$LABEL" =~ ^severity:(.+)$ ]]; then
+            curl -sf -X POST \
+              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg v "${BASH_REMATCH[1]}" '{value: $v}')" \
+              "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}/field/${{ inputs.severity_field_id }}" \
+              > /dev/null || echo "::warning::Failed to update severity field"
+          fi
+
+      - name: Delete ClickUp Bot "Task linked" comments
+        if: |
+          steps.parse.outputs.skip != 'true' &&
+          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.gandalf-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # ClickUp Bot may take a few seconds to post its comment.
+          # Poll up to 30s, then clean up any "Task linked" comments.
+          for i in 1 2 3; do
+            sleep 10
+            COMMENTS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq '[.[] | select(.body | test("^Task linked:")) | {id: .id, user: .user.login}]')
+
+            COUNT=$(echo "$COMMENTS" | jq 'length')
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Found $COUNT 'Task linked' comment(s). Deleting..."
+              echo "$COMMENTS" | jq -r '.[].id' | while read -r COMMENT_ID; do
+                gh api -X DELETE "repos/$REPO/issues/comments/$COMMENT_ID" && \
+                  echo "Deleted comment $COMMENT_ID" || \
+                  echo "::warning::Failed to delete comment $COMMENT_ID"
+              done
+              break
+            fi
+            echo "Attempt $i: No 'Task linked' comments yet, waiting..."
+          done
