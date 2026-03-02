@@ -26,14 +26,26 @@ on:
     secrets:
       CLICKUP_API_TOKEN:
         required: true
+      GANDALF_APP_ID:
+        required: true
+      GANDALF_PRIVATE_KEY:
+        required: true
 
 # PR linking is handled by ClickUp's native GitHub integration (rich cards).
-# This workflow only handles status transitions and custom field updates.
+# This workflow handles status transitions, custom field updates, and
+# cleans up the noisy "Task linked" comments that ClickUp Bot posts on PRs.
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Generate Gandalf token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
+        id: gandalf-token
+        with:
+          app-id: ${{ secrets.GANDALF_APP_ID }}
+          private-key: ${{ secrets.GANDALF_PRIVATE_KEY }}
+
       - name: Parse branch for ticket ID
         id: parse
         run: |
@@ -130,3 +142,33 @@ jobs:
               "https://api.clickup.com/api/v2/task/${{ steps.parse.outputs.ticket_id }}/field/${{ inputs.severity_field_id }}" \
               > /dev/null || echo "::warning::Failed to update severity field"
           fi
+
+      - name: Delete ClickUp Bot "Task linked" comments
+        if: |
+          steps.parse.outputs.skip != 'true' &&
+          (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.gandalf-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # ClickUp Bot may take a few seconds to post its comment.
+          # Poll up to 30s, then clean up any "Task linked" comments.
+          for i in 1 2 3; do
+            sleep 10
+            COMMENTS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq '[.[] | select(.body | test("^Task linked:")) | {id: .id, user: .user.login}]')
+
+            COUNT=$(echo "$COMMENTS" | jq 'length')
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Found $COUNT 'Task linked' comment(s). Deleting..."
+              echo "$COMMENTS" | jq -r '.[].id' | while read -r COMMENT_ID; do
+                gh api -X DELETE "repos/$REPO/issues/comments/$COMMENT_ID" && \
+                  echo "Deleted comment $COMMENT_ID" || \
+                  echo "::warning::Failed to delete comment $COMMENT_ID"
+              done
+              break
+            fi
+            echo "Attempt $i: No 'Task linked' comments yet, waiting..."
+          done
