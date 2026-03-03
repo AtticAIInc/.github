@@ -1,0 +1,212 @@
+# Branch Name Validation — ClickUp Ticket Enforcement
+# Ensures PR branches follow: {type}/CU-{id}-{desc} or {type}/RB-{id}-{desc}
+#
+# Phase 1 (soft):  Posts informational comment, does NOT block merge
+# Phase 2 (hard):  Fails the check — enable as required status check in branch protection
+#
+# Toggle via the `enforcement-mode` input (default: soft)
+#
+# Caller requirements (workflow_call):
+#   permissions:
+#     pull-requests: write
+#     contents: read
+#   secrets:
+#     GANDALF_APP_ID, GANDALF_PRIVATE_KEY
+
+name: Branch Name Validation
+
+on:
+  workflow_call:
+    inputs:
+      enforcement-mode:
+        description: "'soft' = comment only, 'hard' = fail the check"
+        required: false
+        default: "soft"
+        type: string
+      clickup-create-url:
+        description: "URL to create a new ClickUp ticket (team-specific)"
+        required: false
+        default: "https://app.clickup.com"
+        type: string
+      exempt-actors:
+        description: "Comma-separated GitHub actor names to skip (bot accounts)"
+        required: false
+        default: "dependabot[bot],snyk-bot,snyk[bot],gandalf-attic-ai[bot]"
+        type: string
+      exempt-branch-prefixes:
+        description: "Comma-separated branch prefixes to skip (bot branches)"
+        required: false
+        default: "dependabot/,snyk-,gandalf-attic-ai/"
+        type: string
+    secrets:
+      GANDALF_APP_ID:
+        required: true
+      GANDALF_PRIVATE_KEY:
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  validate-branch-name:
+    name: Branch Name Check
+    runs-on: ubuntu-latest
+
+    env:
+      ACTOR: ${{ github.actor }}
+      BRANCH_NAME: ${{ github.head_ref }}
+      ENFORCEMENT: ${{ inputs.enforcement-mode || 'soft' }}
+      CLICKUP_URL: ${{ inputs.clickup-create-url || 'https://app.clickup.com' }}
+      EXEMPT_ACTORS: ${{ inputs.exempt-actors || 'dependabot[bot],snyk-bot,snyk[bot],gandalf-attic-ai[bot]' }}
+      EXEMPT_PREFIXES: ${{ inputs.exempt-branch-prefixes || 'dependabot/,snyk-,gandalf-attic-ai/' }}
+
+    steps:
+      - name: Generate Gandalf token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
+        id: gandalf-token
+        with:
+          app-id: ${{ secrets.GANDALF_APP_ID }}
+          private-key: ${{ secrets.GANDALF_PRIVATE_KEY }}
+
+      # 0. Skip for automated / bot branches
+      - name: Check exemptions
+        id: exempt
+        run: |
+          IFS=',' read -ra ACTORS <<< "$EXEMPT_ACTORS"
+          for actor in "${ACTORS[@]}"; do
+            actor=$(echo "$actor" | xargs)
+            if [[ "$ACTOR" == "$actor" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Exempted: actor '$ACTOR'"
+              exit 0
+            fi
+          done
+
+          IFS=',' read -ra PREFIXES <<< "$EXEMPT_PREFIXES"
+          for prefix in "${PREFIXES[@]}"; do
+            prefix=$(echo "$prefix" | xargs)
+            if [[ "$BRANCH_NAME" == "$prefix"* ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Exempted: branch prefix '$prefix'"
+              exit 0
+            fi
+          done
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      # 1. Validate branch name against the naming convention
+      - name: Check branch name pattern
+        if: steps.exempt.outputs.skip != 'true'
+        id: check
+        run: |
+          PATTERN='^(feat|fix|hotfix|chore|ci|devops|refactor|test|docs|security|patch)/(CU|RB)-[a-zA-Z0-9]+-.+$'
+
+          echo "Branch: $BRANCH_NAME"
+          echo "Pattern: $PATTERN"
+
+          if [[ "$BRANCH_NAME" =~ $PATTERN ]]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+            echo "Branch name matches the required pattern."
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "Branch name does NOT match the required pattern."
+          fi
+
+      # 2. Post or update result comment
+      - name: Post result comment
+        continue-on-error: true
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RESULT_VALID: ${{ steps.check.outputs.valid || 'true' }}
+          RESULT_EXEMPT: ${{ steps.exempt.outputs.skip }}
+        with:
+          github-token: ${{ steps.gandalf-token.outputs.token }}
+          script: |
+            const marker = '<!-- branch-name-check -->';
+            const valid = process.env.RESULT_VALID === 'true';
+            const exempt = process.env.RESULT_EXEMPT === 'true';
+
+            let body;
+            if (exempt || valid) {
+              body = null;
+            } else {
+              body = [
+                marker,
+                '### Branch Name Check — Failed',
+                '',
+                `This PR's branch (\`${process.env.BRANCH_NAME}\`) does not follow the required naming convention:`,
+                '',
+                '```',
+                '{type}/CU-{ticket_id}-{short_description}',
+                '{type}/RB-{ticket_id}-{short_description}',
+                '```',
+                '',
+                '**Allowed types:** `feat`, `fix`, `hotfix`, `chore`, `ci`, `devops`, `refactor`, `test`, `docs`, `security`, `patch`',
+                '',
+                '**Examples:**',
+                '- `feat/CU-abc123-add-user-auth`',
+                '- `fix/RB-78k2m-resolve-null-pointer`',
+                '',
+                '### Why does this matter?',
+                'We use branch names to automatically sync PRs to ClickUp tickets. Without a valid ticket ID, this work won\'t be tracked.',
+                '',
+                `**[Open ClickUp](${process.env.CLICKUP_URL})** and create a ticket in your team's space if one doesn't exist yet, then rename your branch.`,
+                '',
+                '**To rename your branch:**',
+                '```bash',
+                '# locally',
+                'git branch -m old-name feat/CU-XXXXX-your-description',
+                'git push origin -u feat/CU-XXXXX-your-description',
+                'git push origin --delete old-name',
+                '```',
+                '',
+                process.env.ENFORCEMENT === 'soft'
+                  ? '> **Note:** This is an informational check only — it will not block your merge during the adoption period.'
+                  : '> **Blocked:** This is a required check — you must rename your branch before this PR can be merged.',
+              ].join('\n');
+            }
+
+            // Find existing comment (first page only — bot comment is near the top)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 30,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (body === null) {
+              // Valid or exempt — clean up any stale comment
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+                console.log('Removed comment (exempt branch).');
+              }
+            } else if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              console.log('Updated existing comment.');
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              console.log('Created new comment.');
+            }
+
+      # 3. Fail the job in hard-enforcement mode
+      - name: Enforce (hard mode)
+        if: steps.check.outputs.valid == 'false' && inputs.enforcement-mode == 'hard'
+        run: |
+          echo "::error::Branch name '$BRANCH_NAME' does not match the required pattern. Rename your branch to include a CU- or RB- ticket ID."
+          exit 1
