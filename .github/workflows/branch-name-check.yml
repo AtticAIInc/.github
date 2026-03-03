@@ -10,6 +10,8 @@
 #   permissions:
 #     pull-requests: write
 #     contents: read
+#   secrets:
+#     GANDALF_APP_ID, GANDALF_PRIVATE_KEY
 
 name: Branch Name Validation
 
@@ -36,6 +38,11 @@ on:
         required: false
         default: "dependabot/,snyk-,gandalf-attic-ai/"
         type: string
+    secrets:
+      GANDALF_APP_ID:
+        required: true
+      GANDALF_PRIVATE_KEY:
+        required: true
 
 permissions:
   pull-requests: write
@@ -55,6 +62,13 @@ jobs:
       EXEMPT_PREFIXES: ${{ inputs.exempt-branch-prefixes || 'dependabot/,snyk-,gandalf-attic-ai/' }}
 
     steps:
+      - name: Generate Gandalf token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
+        id: gandalf-token
+        with:
+          app-id: ${{ secrets.GANDALF_APP_ID }}
+          private-key: ${{ secrets.GANDALF_PRIVATE_KEY }}
+
       # 0. Skip for automated / bot branches
       - name: Check exemptions
         id: exempt
@@ -93,69 +107,93 @@ jobs:
 
           if [[ "$BRANCH_NAME" =~ $PATTERN ]]; then
             echo "valid=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Branch name matches the required pattern."
+            echo "Branch name matches the required pattern."
           else
             echo "valid=false" >> "$GITHUB_OUTPUT"
-            echo "❌ Branch name does NOT match the required pattern."
+            echo "Branch name does NOT match the required pattern."
           fi
 
-      # 2. Post / update a PR comment when the name is invalid
-      - name: Post informational comment
-        if: steps.check.outputs.valid == 'false'
+      # 2. Post or update result comment
+      - name: Post result comment
         continue-on-error: true
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RESULT_VALID: ${{ steps.check.outputs.valid || 'true' }}
+          RESULT_EXEMPT: ${{ steps.exempt.outputs.skip }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.gandalf-token.outputs.token }}
           script: |
             const marker = '<!-- branch-name-check -->';
-            const body = [
-              marker,
-              '## ⚠️ Branch Name — Missing ClickUp Ticket',
-              '',
-              `This PR's branch (\`${process.env.BRANCH_NAME}\`) does not follow the required naming convention:`,
-              '',
-              '```',
-              '{type}/CU-{ticket_id}-{short_description}',
-              '{type}/RB-{ticket_id}-{short_description}',
-              '```',
-              '',
-              '**Allowed types:** `feat`, `fix`, `hotfix`, `chore`, `ci`, `devops`, `refactor`, `test`, `docs`, `security`, `patch`',
-              '',
-              '**Examples:**',
-              '- `feat/CU-abc123-add-user-auth`',
-              '- `fix/RB-78k2m-resolve-null-pointer`',
-              '',
-              '### Why does this matter?',
-              'We use branch names to automatically sync PRs to ClickUp tickets. Without a valid ticket ID, this work won\'t be tracked.',
-              '',
-              `👉 **[Open ClickUp](${process.env.CLICKUP_URL})** and create a ticket in your team's space if one doesn't exist yet, then rename your branch.`,
-              '',
-              '**To rename your branch:**',
-              '```bash',
-              '# locally',
-              'git branch -m old-name feat/CU-XXXXX-your-description',
-              'git push origin -u feat/CU-XXXXX-your-description',
-              'git push origin --delete old-name',
-              '```',
-              '',
-              process.env.ENFORCEMENT === 'soft'
-                ? '> ℹ️ **This is an informational check only** — it will not block your merge during the adoption period.'
-                : '> 🚫 **This is a required check** — you must rename your branch before this PR can be merged.',
-            ].join('\n');
+            const valid = process.env.RESULT_VALID === 'true';
+            const exempt = process.env.RESULT_EXEMPT === 'true';
 
-            // Upsert: update existing comment or create a new one
-            const comments = await github.paginate(
-              github.rest.issues.listComments,
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              }
-            );
+            let body;
+            if (exempt) {
+              body = null;
+            } else if (valid) {
+              body = [
+                marker,
+                '### Branch Name Check — Passed',
+                '',
+                `Branch \`${process.env.BRANCH_NAME}\` follows the required naming convention.`,
+              ].join('\n');
+            } else {
+              body = [
+                marker,
+                '### Branch Name Check — Failed',
+                '',
+                `This PR's branch (\`${process.env.BRANCH_NAME}\`) does not follow the required naming convention:`,
+                '',
+                '```',
+                '{type}/CU-{ticket_id}-{short_description}',
+                '{type}/RB-{ticket_id}-{short_description}',
+                '```',
+                '',
+                '**Allowed types:** `feat`, `fix`, `hotfix`, `chore`, `ci`, `devops`, `refactor`, `test`, `docs`, `security`, `patch`',
+                '',
+                '**Examples:**',
+                '- `feat/CU-abc123-add-user-auth`',
+                '- `fix/RB-78k2m-resolve-null-pointer`',
+                '',
+                '### Why does this matter?',
+                'We use branch names to automatically sync PRs to ClickUp tickets. Without a valid ticket ID, this work won\'t be tracked.',
+                '',
+                `**[Open ClickUp](${process.env.CLICKUP_URL})** and create a ticket in your team's space if one doesn't exist yet, then rename your branch.`,
+                '',
+                '**To rename your branch:**',
+                '```bash',
+                '# locally',
+                'git branch -m old-name feat/CU-XXXXX-your-description',
+                'git push origin -u feat/CU-XXXXX-your-description',
+                'git push origin --delete old-name',
+                '```',
+                '',
+                process.env.ENFORCEMENT === 'soft'
+                  ? '> **Note:** This is an informational check only — it will not block your merge during the adoption period.'
+                  : '> **Blocked:** This is a required check — you must rename your branch before this PR can be merged.',
+              ].join('\n');
+            }
 
+            // Find existing comment (first page only — bot comment is near the top)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 30,
+            });
             const existing = comments.find(c => c.body.includes(marker));
 
-            if (existing) {
+            if (body === null) {
+              // Exempt branch — clean up any stale comment
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+                console.log('Removed comment (exempt branch).');
+              }
+            } else if (existing) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -179,32 +217,3 @@ jobs:
         run: |
           echo "::error::Branch name '$BRANCH_NAME' does not match the required pattern. Rename your branch to include a CU- or RB- ticket ID."
           exit 1
-
-      # 4. Clean up stale comment if branch was renamed and now passes
-      - name: Remove stale comment on valid branch
-        if: steps.check.outputs.valid == 'true' || steps.exempt.outputs.skip == 'true'
-        continue-on-error: true
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const marker = '<!-- branch-name-check -->';
-            // Fetch only the first page (30 comments) — the bot comment is
-            // almost always near the top.  If the PR has 30+ comments and the
-            // marker isn't found, we accept the miss to avoid paginating the
-            // entire thread on every push for valid branches.
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              per_page: 30,
-            });
-            const existing = comments.find(c => c.body.includes(marker));
-            if (existing) {
-              await github.rest.issues.deleteComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-              });
-              console.log('Removed stale branch-name comment.');
-            }
