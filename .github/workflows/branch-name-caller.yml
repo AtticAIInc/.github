@@ -10,6 +10,6 @@ permissions:
 
 jobs:
   check:
-    uses: AtticAIInc/.github/.github/workflows/branch-name-check.yml@main
+    uses: AtticAIInc/.github/.github/workflows/branch-name-check.yml@ci/CU-86e02c9c8-branch-naming
     with:
       enforcement-mode: soft
