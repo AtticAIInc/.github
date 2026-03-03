@@ -56,7 +56,7 @@ jobs:
           IFS=',' read -ra PREFIX_ARRAY <<< "$PREFIXES"
           for prefix in "${PREFIX_ARRAY[@]}"; do
             prefix=$(echo "$prefix" | xargs)
-            if [[ "$BRANCH" =~ ^${prefix}([a-zA-Z0-9]+) ]]; then
+            if [[ "$BRANCH" =~ ${prefix}([a-zA-Z0-9]+) ]]; then
               TICKET_ID="${BASH_REMATCH[1]}"
               break
             fi
