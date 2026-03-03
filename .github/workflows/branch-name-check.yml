@@ -128,15 +128,8 @@ jobs:
             const exempt = process.env.RESULT_EXEMPT === 'true';
 
             let body;
-            if (exempt) {
+            if (exempt || valid) {
               body = null;
-            } else if (valid) {
-              body = [
-                marker,
-                '### Branch Name Check — Passed',
-                '',
-                `Branch \`${process.env.BRANCH_NAME}\` follows the required naming convention.`,
-              ].join('\n');
             } else {
               body = [
                 marker,
@@ -184,7 +177,7 @@ jobs:
             const existing = comments.find(c => c.body.includes(marker));
 
             if (body === null) {
-              // Exempt branch — clean up any stale comment
+              // Valid or exempt — clean up any stale comment
               if (existing) {
                 await github.rest.issues.deleteComment({
                   owner: context.repo.owner,
