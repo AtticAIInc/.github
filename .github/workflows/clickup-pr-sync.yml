@@ -8,4 +8,8 @@ jobs:
   sync:
     if: github.event.pull_request.draft == false
     uses: AtticAIInc/.github/.github/workflows/clickup-sync.yml@main
-    secrets: inherit
+    secrets:
+      CLICKUP_TOKEN: ${{ secrets.CLICKUP_TOKEN }}
+      GANDALF_APP_ID: ${{ secrets.GANDALF_APP_ID }}
+      GANDALF_PRIVATE_KEY: ${{ secrets.GANDALF_PRIVATE_KEY }}
+
