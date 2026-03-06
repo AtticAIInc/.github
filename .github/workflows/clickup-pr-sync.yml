@@ -4,9 +4,13 @@ on:
   pull_request:
     types: [opened, closed, ready_for_review, labeled]
 
+permissions: {}
+
 jobs:
   sync:
-    if: github.event.pull_request.draft == false
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     uses: AtticAIInc/.github/.github/workflows/clickup-sync.yml@main
     secrets:
       CLICKUP_TOKEN: ${{ secrets.CLICKUP_TOKEN }}
